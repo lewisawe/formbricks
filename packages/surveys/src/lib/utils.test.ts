@@ -13,6 +13,7 @@ import {
   getShuffledRowIndices,
   isRTL,
   isRTLLanguage,
+  makeRequest,
 } from "./utils";
 
 // Mock crypto.getRandomValues for deterministic shuffle tests
@@ -559,5 +560,81 @@ describe("cn", () => {
 
   test("handles nulls, booleans and undefined values", () => {
     expect(cn(null, true, false, undefined, [null, true, false, undefined])).toBe("");
+  });
+});
+
+// Regression tests for #6581: "API data is not always validated in the surveys
+// package" (Sentry: FORMBRICKS-CLOUD-3VE). A `null`/non-JSON API response used to
+// crash with "Cannot read properties of null (reading 'data')" or an unhandled
+// SyntaxError instead of returning a typed network error.
+describe("makeRequest", () => {
+  const mockFetch = vi.fn();
+
+  beforeEach(() => {
+    vi.stubGlobal("fetch", mockFetch);
+    mockFetch.mockReset();
+  });
+
+  test("returns the data envelope on a successful response", async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: vi.fn().mockResolvedValue({ data: { test: "data" } }),
+    });
+
+    const result = await makeRequest<{ test: string }>("https://example.com", "/api/test", "GET");
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.data).toEqual({ test: "data" });
+    }
+  });
+
+  test("handles a literal null JSON body on a 2xx response without throwing", async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: vi.fn().mockResolvedValue(null),
+    });
+
+    const result = await makeRequest<{ test: string }>("https://example.com", "/api/test", "GET");
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe("network_error");
+      expect(result.error.message).toBe("Received invalid response data from the server");
+    }
+  });
+
+  test("handles a non-JSON response body without throwing an unhandled error", async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: vi.fn().mockRejectedValue(new SyntaxError("Unexpected token < in JSON at position 0")),
+    });
+
+    const result = await makeRequest<{ test: string }>("https://example.com", "/api/test", "GET");
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe("network_error");
+      expect(result.error.message).toBe("Failed to parse response body as JSON");
+    }
+  });
+
+  test("handles a null body on a non-OK response without throwing", async () => {
+    mockFetch.mockResolvedValue({
+      ok: false,
+      status: 502,
+      json: vi.fn().mockResolvedValue(null),
+    });
+
+    const result = await makeRequest<{ test: string }>("https://example.com", "/api/test", "GET");
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe("network_error");
+      expect(result.error.status).toBe(502);
+    }
   });
 });

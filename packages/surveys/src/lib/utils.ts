@@ -194,20 +194,49 @@ export const makeRequest = async <T>(
   if (!res.ok) return err(res.error as unknown as ApiErrorResponse);
 
   const response = res.data;
-  const json = (await response.json()) as ApiResponse;
 
-  if (!response.ok) {
-    const errorResponse = json as ApiErrorResponse;
+  // The response body is not guaranteed to be valid JSON. Proxies and gateways can
+  // return empty bodies or HTML error pages, so `response.json()` must not be allowed
+  // to throw an unhandled SyntaxError.
+  const parsedJson = await wrapThrowsAsync(() => response.json() as Promise<ApiResponse>)();
+
+  if (!parsedJson.ok) {
     return err({
-      code: errorResponse.code === "forbidden" ? "forbidden" : "network_error",
+      code: "network_error",
       status: response.status,
-      message: errorResponse.message || "Something went wrong",
+      message: "Failed to parse response body as JSON",
       url,
-      ...(Object.keys(errorResponse.details ?? {}).length > 0 && { details: errorResponse.details }),
     });
   }
 
-  const successResponse = json as ApiSuccessResponse<T>;
+  const json = parsedJson.data;
+
+  if (!response.ok) {
+    const errorResponse = json as ApiErrorResponse | null;
+    return err({
+      code: errorResponse?.code === "forbidden" ? "forbidden" : "network_error",
+      status: response.status,
+      message: errorResponse?.message || "Something went wrong",
+      url,
+      ...(Object.keys(errorResponse?.details ?? {}).length > 0 && { details: errorResponse?.details }),
+    });
+  }
+
+  // A 2xx response can still carry a `null` body or omit the `data` envelope (for
+  // example a literal `null` from the API). Validate before reading `.data` so we
+  // return a typed network error instead of throwing
+  // "Cannot read properties of null (reading 'data')".
+  const successResponse = json as ApiSuccessResponse<T> | null;
+
+  if (successResponse === null || successResponse.data === undefined || successResponse.data === null) {
+    return err({
+      code: "network_error",
+      status: response.status,
+      message: "Received invalid response data from the server",
+      url,
+    });
+  }
+
   return ok(successResponse.data);
 };
 
