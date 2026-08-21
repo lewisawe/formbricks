@@ -168,6 +168,79 @@ describe("api.ts", () => {
         },
       });
     });
+
+    // Regression tests for #6581: "API data is not always validated in the surveys
+    // package" (Sentry: FORMBRICKS-CLOUD-3VE). A `null` JSON body or a non-JSON body
+    // used to crash with "Cannot read properties of null (reading 'data')" or an
+    // unhandled SyntaxError instead of returning a typed network error.
+    test("handles a literal null JSON body on a 2xx response without throwing", async () => {
+      const mockResponse = {
+        ok: true,
+        status: 200,
+        json: vi.fn().mockResolvedValue(null),
+      };
+      mockFetch.mockResolvedValue(mockResponse);
+
+      const result = await makeRequest<{ test: string }>("https://example.com", "/api/test", "GET");
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.code).toBe("network_error");
+        expect(result.error.message).toBe("Received invalid response data from the server");
+        expect(result.error.status).toBe(200);
+      }
+    });
+
+    test("handles a 2xx response missing the data envelope without throwing", async () => {
+      const mockResponse = {
+        ok: true,
+        status: 200,
+        json: vi.fn().mockResolvedValue({ notData: "oops" }),
+      };
+      mockFetch.mockResolvedValue(mockResponse);
+
+      const result = await makeRequest<{ test: string }>("https://example.com", "/api/test", "GET");
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.code).toBe("network_error");
+        expect(result.error.message).toBe("Received invalid response data from the server");
+      }
+    });
+
+    test("handles a non-JSON response body without throwing an unhandled error", async () => {
+      const mockResponse = {
+        ok: true,
+        status: 200,
+        json: vi.fn().mockRejectedValue(new SyntaxError("Unexpected token < in JSON at position 0")),
+      };
+      mockFetch.mockResolvedValue(mockResponse);
+
+      const result = await makeRequest<{ test: string }>("https://example.com", "/api/test", "GET");
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.code).toBe("network_error");
+        expect(result.error.message).toBe("Failed to parse response body as JSON");
+      }
+    });
+
+    test("handles a null body on a non-OK response without throwing", async () => {
+      const mockResponse = {
+        ok: false,
+        status: 502,
+        json: vi.fn().mockResolvedValue(null),
+      };
+      mockFetch.mockResolvedValue(mockResponse);
+
+      const result = await makeRequest<{ test: string }>("https://example.com", "/api/test", "GET");
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.code).toBe("network_error");
+        expect(result.error.status).toBe(502);
+      }
+    });
   });
 
   // ---------------------------------------------------------------------------------
